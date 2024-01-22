@@ -26,7 +26,7 @@ full = [
 ]
 
 # Enable local server
-local = ["local-dns","hickory-dns","local-redir"]
+local = ["local-dns","hickory-dns","local-redir","local-tun"]
 # Enable remote server
 server = []
 # Enable manager server
