@@ -27,7 +27,7 @@ full = [
 ]
 
 # Enable local server
-local = ["httparse"]
+local = ["httparse","hickory-dns","local-http","local-redir"]
 # Enable remote server
 server = []
 # Enable manager server
