@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
+use futures::future;
 use log::{error, trace};
 use shadowsocks::{
     config::{ManagerAddr, ServerConfig},
@@ -18,7 +18,7 @@ use shadowsocks::{
 };
 use tokio::time;
 
-use crate::{acl::AccessControl, config::SecurityConfig, net::FlowStat};
+use crate::{acl::AccessControl, config::SecurityConfig, net::FlowStat, utils::ServerHandle};
 
 use super::{context::ServiceContext, tcprelay::TcpServer, udprelay::UdpServer};
 
@@ -187,36 +187,33 @@ impl Server {
 
     /// Start serving
     pub async fn run(self) -> io::Result<()> {
-        let vfut = FuturesUnordered::new();
+        let mut vfut = Vec::new();
 
         if let Some(plugin) = self.plugin {
-            vfut.push(
-                async move {
-                    match plugin.join().await {
-                        Ok(status) => {
-                            error!("plugin exited with status: {}", status);
-                            Ok(())
-                        }
-                        Err(err) => {
-                            error!("plugin exited with error: {}", err);
-                            Err(err)
-                        }
+            vfut.push(ServerHandle(tokio::spawn(async move {
+                match plugin.join().await {
+                    Ok(status) => {
+                        error!("plugin exited with status: {}", status);
+                        Ok(())
+                    }
+                    Err(err) => {
+                        error!("plugin exited with error: {}", err);
+                        Err(err)
                     }
                 }
-                .boxed(),
-            );
+            })));
         }
 
         if let Some(tcp_server) = self.tcp_server {
-            vfut.push(tcp_server.run().boxed());
+            vfut.push(ServerHandle(tokio::spawn(tcp_server.run())));
         }
 
         if let Some(udp_server) = self.udp_server {
-            vfut.push(udp_server.run().boxed())
+            vfut.push(ServerHandle(tokio::spawn(udp_server.run())));
         }
 
         if let Some(manager_addr) = self.manager_addr {
-            let manager_fut = async move {
+            vfut.push(ServerHandle(tokio::spawn(async move {
                 loop {
                     match ManagerClient::connect(
                         self.context.context_ref(),
@@ -251,13 +248,10 @@ impl Server {
                     // Report every 10 seconds
                     time::sleep(Duration::from_secs(10)).await;
                 }
-            }
-            .boxed();
-            vfut.push(manager_fut);
+            })));
         }
 
-        let (res, _) = vfut.into_future().await;
-        if let Some(Err(err)) = res {
+        if let (Err(err), ..) = future::select_all(vfut).await {
             error!("servers exited with error: {}", err);
         }
 
