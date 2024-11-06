@@ -7,7 +7,7 @@ use std::{
     error,
     fmt::{self, Debug, Display},
     net::SocketAddr,
-    str::FromStr,
+    str::{self, FromStr},
     sync::Arc,
     time::Duration,
 };
@@ -16,15 +16,13 @@ use base64::Engine as _;
 use byte_string::ByteStr;
 use bytes::Bytes;
 use cfg_if::cfg_if;
-use log::error;
+use log::{error, warn};
 use thiserror::Error;
 use url::{self, Url};
 
-use crate::{
-    crypto::{v1::openssl_bytes_to_key, CipherKind},
-    plugin::PluginConfig,
-    relay::socks5::Address,
-};
+#[cfg(any(feature = "stream-cipher", feature = "aead-cipher"))]
+use crate::crypto::v1::openssl_bytes_to_key;
+use crate::{crypto::CipherKind, plugin::PluginConfig, relay::socks5::Address};
 
 const USER_KEY_BASE64_ENGINE: base64::engine::GeneralPurpose = base64::engine::GeneralPurpose::new(
     &base64::alphabet::STANDARD,
@@ -100,15 +98,20 @@ impl Mode {
             _ => unreachable!(),
         }
     }
+
+    /// String representation of Mode
+    pub fn as_str(&self) -> &'static str {
+        match *self {
+            Mode::TcpOnly => "tcp_only",
+            Mode::TcpAndUdp => "tcp_and_udp",
+            Mode::UdpOnly => "udp_only",
+        }
+    }
 }
 
 impl fmt::Display for Mode {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            Mode::TcpOnly => f.write_str("tcp_only"),
-            Mode::TcpAndUdp => f.write_str("tcp_and_udp"),
-            Mode::UdpOnly => f.write_str("udp_only"),
-        }
+        f.write_str(self.as_str())
     }
 }
 
@@ -122,6 +125,74 @@ impl FromStr for Mode {
             "udp_only" => Ok(Mode::UdpOnly),
             _ => Err(()),
         }
+    }
+}
+
+struct ModeVisitor;
+
+impl<'de> serde::de::Visitor<'de> for ModeVisitor {
+    type Value = Mode;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("Mode")
+    }
+
+    fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        match v.parse::<Mode>() {
+            Ok(m) => Ok(m),
+            Err(_) => Err(serde::de::Error::invalid_value(serde::de::Unexpected::Str(v), &self)),
+        }
+    }
+
+    fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.visit_str::<E>(v.as_str())
+    }
+
+    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        match str::from_utf8(v) {
+            Ok(v) => self.visit_str(v),
+            Err(_) => Err(serde::de::Error::invalid_value(serde::de::Unexpected::Bytes(v), &self)),
+        }
+    }
+
+    fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        match String::from_utf8(v) {
+            Ok(v) => self.visit_string(v),
+            Err(e) => Err(serde::de::Error::invalid_value(
+                serde::de::Unexpected::Bytes(&e.into_bytes()),
+                &self,
+            )),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Mode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_string(ModeVisitor)
+    }
+}
+
+impl serde::Serialize for Mode {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
     }
 }
 
@@ -354,9 +425,9 @@ pub struct ServerConfig {
     source: ServerSource,
 }
 
-#[cfg(feature = "aead-cipher-2022")]
 #[inline]
 fn make_derived_key(method: CipherKind, password: &str, enc_key: &mut [u8]) {
+    #[cfg(feature = "aead-cipher-2022")]
     if method.is_aead_2022() {
         // AEAD 2022 password is a base64 form of enc_key
         match AEAD2022_PASSWORD_BASE64_ENGINE.decode(password) {
@@ -376,15 +447,21 @@ fn make_derived_key(method: CipherKind, password: &str, enc_key: &mut [u8]) {
                 panic!("{method} password {password} is not base64 encoded, error: {err}");
             }
         }
-    } else {
-        openssl_bytes_to_key(password.as_bytes(), enc_key);
-    }
-}
 
-#[cfg(not(feature = "aead-cipher-2022"))]
-#[inline]
-fn make_derived_key(_method: CipherKind, password: &str, enc_key: &mut [u8]) {
-    openssl_bytes_to_key(password.as_bytes(), enc_key);
+        return;
+    }
+
+    cfg_if! {
+        if #[cfg(any(feature = "stream-cipher", feature = "aead-cipher"))] {
+            let _ = method;
+            openssl_bytes_to_key(password.as_bytes(), enc_key);
+        } else {
+            // No default implementation.
+            let _ = password;
+            let _ = enc_key;
+            unreachable!("{method} don't know how to make a derived key");
+        }
+    }
 }
 
 /// Check if method supports Extended Identity Header
@@ -405,12 +482,28 @@ where
 {
     let password = password.into();
 
-    #[cfg(feature = "stream-cipher")]
-    if method == CipherKind::SS_TABLE {
-        // TABLE cipher doesn't need key derivation.
-        // Reference implemenation: shadowsocks-libev, shadowsocks (Python)
-        let enc_key = password.clone().into_bytes().into_boxed_slice();
-        return (password, enc_key, Vec::new());
+    match method {
+        CipherKind::NONE => {
+            // NONE method's key length is 0
+            debug_assert_eq!(method.key_len(), 0);
+
+            if !password.is_empty() {
+                warn!("method \"none\" doesn't need a password, which should be set as an empty String, but password.len() = {}", password.len());
+            }
+
+            return (password, Vec::new().into_boxed_slice(), Vec::new());
+        }
+
+        #[cfg(feature = "stream-cipher")]
+        CipherKind::SS_TABLE => {
+            // TABLE cipher doesn't need key derivation.
+            // Reference implemenation: shadowsocks-libev, shadowsocks (Python)
+            let enc_key = password.clone().into_bytes().into_boxed_slice();
+            return (password, enc_key, Vec::new());
+        }
+
+        #[allow(unreachable_patterns)]
+        _ => {}
     }
 
     #[cfg(feature = "aead-cipher-2022")]
@@ -986,6 +1079,74 @@ impl Display for ServerAddr {
     }
 }
 
+struct ServerAddrVisitor;
+
+impl<'de> serde::de::Visitor<'de> for ServerAddrVisitor {
+    type Value = ServerAddr;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("ServerAddr")
+    }
+
+    fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        match v.parse::<ServerAddr>() {
+            Ok(m) => Ok(m),
+            Err(_) => Err(serde::de::Error::invalid_value(serde::de::Unexpected::Str(v), &self)),
+        }
+    }
+
+    fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.visit_str::<E>(v.as_str())
+    }
+
+    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        match str::from_utf8(v) {
+            Ok(v) => self.visit_str(v),
+            Err(_) => Err(serde::de::Error::invalid_value(serde::de::Unexpected::Bytes(v), &self)),
+        }
+    }
+
+    fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        match String::from_utf8(v) {
+            Ok(v) => self.visit_string(v),
+            Err(e) => Err(serde::de::Error::invalid_value(
+                serde::de::Unexpected::Bytes(&e.into_bytes()),
+                &self,
+            )),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ServerAddr {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_string(ServerAddrVisitor)
+    }
+}
+
+impl serde::Serialize for ServerAddr {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.to_string().as_str())
+    }
+}
+
 impl From<SocketAddr> for ServerAddr {
     fn from(addr: SocketAddr) -> ServerAddr {
         ServerAddr::SocketAddr(addr)
@@ -1096,6 +1257,74 @@ impl Display for ManagerAddr {
             #[cfg(unix)]
             ManagerAddr::UnixSocketAddr(ref path) => fmt::Display::fmt(&path.display(), f),
         }
+    }
+}
+
+struct ManagerAddrVisitor;
+
+impl<'de> serde::de::Visitor<'de> for ManagerAddrVisitor {
+    type Value = ManagerAddr;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("ManagerAddr")
+    }
+
+    fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        match v.parse::<ManagerAddr>() {
+            Ok(m) => Ok(m),
+            Err(_) => Err(serde::de::Error::invalid_value(serde::de::Unexpected::Str(v), &self)),
+        }
+    }
+
+    fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.visit_str::<E>(v.as_str())
+    }
+
+    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        match str::from_utf8(v) {
+            Ok(v) => self.visit_str(v),
+            Err(_) => Err(serde::de::Error::invalid_value(serde::de::Unexpected::Bytes(v), &self)),
+        }
+    }
+
+    fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        match String::from_utf8(v) {
+            Ok(v) => self.visit_string(v),
+            Err(e) => Err(serde::de::Error::invalid_value(
+                serde::de::Unexpected::Bytes(&e.into_bytes()),
+                &self,
+            )),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ManagerAddr {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_string(ManagerAddrVisitor)
+    }
+}
+
+impl serde::Serialize for ManagerAddr {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.to_string().as_str())
     }
 }
 
