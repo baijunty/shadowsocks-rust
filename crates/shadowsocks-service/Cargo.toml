@@ -1,6 +1,6 @@
 [package]
 name = "shadowsocks-service"
-version = "1.22.0"
+version = "1.23.0"
 authors = ["Shadowsocks Contributors"]
 description = "shadowsocks is a fast tunnel proxy that helps you bypass firewalls."
 repository = "https://github.com/shadowsocks/shadowsocks-rust"
@@ -42,27 +42,13 @@ hickory-dns = ["hickory-resolver", "shadowsocks/trust-dns"]
 trust-dns = ["hickory-dns"]
 dns-over-tls = [
     "hickory-dns",
-    "hickory-resolver/dns-over-tls",
     "hickory-resolver/dns-over-rustls",
     "hickory-resolver/webpki-roots",
-    "hickory-resolver/native-certs",
-]
-dns-over-native-tls = [
-    "hickory-dns",
-    "hickory-resolver/dns-over-tls",
-    "hickory-resolver/dns-over-native-tls",
-]
-dns-over-native-tls-vendored = [
-    "hickory-dns",
-    "hickory-resolver/dns-over-tls",
-    "hickory-resolver/dns-over-native-tls",
-    "native-tls/vendored",
 ]
 dns-over-https = [
     "hickory-dns",
     "hickory-resolver/dns-over-https-rustls",
     "hickory-resolver/webpki-roots",
-    "hickory-resolver/native-certs",
 ]
 dns-over-h3 = ["hickory-dns", "hickory-resolver/dns-over-h3"]
 
@@ -180,7 +166,7 @@ http-body-util = { version = "0.1", optional = true }
 http = { version = "1.1", optional = true }
 httparse = { version = "1.9", optional = true }
 
-hickory-resolver = { version = "=0.25.0-alpha.4", optional = true, features = [
+hickory-resolver = { version = "=0.25.0-alpha.5", optional = true, features = [
     "serde",
 ] }
 
@@ -211,7 +197,7 @@ serde = { version = "1.0", features = ["derive"] }
 json5 = "0.4"
 bson = { version = "2.13.0", optional = true }
 
-shadowsocks = { version = "1.22.0", path = "../shadowsocks", default-features = false }
+shadowsocks = { version = "1.23.0", path = "../shadowsocks", default-features = false }
 
 # Just for the ioctl call macro
 [target.'cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "openbsd"))'.dependencies]
