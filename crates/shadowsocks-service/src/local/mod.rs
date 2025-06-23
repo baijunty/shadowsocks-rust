@@ -1,11 +1,6 @@
 //! Shadowsocks Local Server
 
-use std::{
-    io,
-    net::SocketAddr,
-    sync::Arc,
-    time::Duration,
-};
+use std::{io, net::SocketAddr, sync::Arc, time::Duration};
 
 use futures::future;
 use log::trace;
@@ -94,7 +89,7 @@ pub struct Server {
 
 impl Server {
     /// Create a shadowsocks local server
-    pub async fn new(config: Config) -> io::Result<Server> {
+    pub async fn new(config: Config) -> io::Result<Self> {
         assert!(config.config_type == ConfigType::Local && !config.local.is_empty());
 
         trace!("{:?}", config);
@@ -223,7 +218,7 @@ impl Server {
             balancer_builder.build().await?
         };
 
-        let mut local_server = Server {
+        let mut local_server = Self {
             balancer: balancer.clone(),
             socks_servers: Vec::new(),
             #[cfg(feature = "local-tunnel")]

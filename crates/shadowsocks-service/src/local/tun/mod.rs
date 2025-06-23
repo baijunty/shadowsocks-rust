@@ -3,8 +3,7 @@
 #[cfg(unix)]
 use std::os::unix::io::RawFd;
 use std::{
-    io,
-    mem,
+    io, mem,
     net::{IpAddr, SocketAddr},
     sync::Arc,
     time::Duration,
@@ -64,8 +63,8 @@ unsafe impl Send for TunBuilder {}
 
 impl TunBuilder {
     /// Create a Tun service builder
-    pub fn new(context: Arc<ServiceContext>, balancer: PingBalancer) -> TunBuilder {
-        TunBuilder {
+    pub fn new(context: Arc<ServiceContext>, balancer: PingBalancer) -> Self {
+        Self {
             context,
             balancer,
             tun_config: TunConfiguration::default(),
