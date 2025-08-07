@@ -827,7 +827,7 @@ impl PingChecker {
         };
 
         if stat_data.fail_rate > 0.8 {
-            warn!(
+            debug!(
                 "balancer: checked & updated remote {} server {} (score: {}), {:?}",
                 self.server_type,
                 ServerConfigFormatter::new(self.server.server_config()),
